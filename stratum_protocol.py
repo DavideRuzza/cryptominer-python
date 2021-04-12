@@ -1,8 +1,6 @@
 import socket, json, urllib.parse, threading
 from time import sleep
 
-
-
 class JsonRcpClient(object):
     ''' Simple Json RCP client'''
     
@@ -11,6 +9,7 @@ class JsonRcpClient(object):
         self._rcp_thread = None
         self._message_id = 1
         self._lock = threading.RLock()
+        self._requests = dict()
     
     def rcp_thread_fun(self):
         data = ""
@@ -25,7 +24,16 @@ class JsonRcpClient(object):
                 continue
             
             reply = json.loads(line)
-            self.handle_reply(reply)
+            # Find if the reply was a response from a specific request 
+            # or a simple notification from the server (response = None)
+            request = None
+            if reply.get('id'):
+                # get the reply id which refer to the corresponding response
+                request = self._requests[reply.get('id')]  
+            
+            
+
+            self.handle_reply(request, reply)
             
         
     def connect(self, url: str):
@@ -53,18 +61,38 @@ class JsonRcpClient(object):
         """
         
         request = dict(id=self._message_id, method=method, params=params)
+        self._requests[self._message_id] = request
+
         request = json.dumps(request)
-        print(request)
+
+        # print(request)
         with self._lock:
             self._message_id += 1
             self._socket.send((request+'\n').encode())
     
-    def handle_reply(self, reply):
+    # ONLY FOR DEBUG
+    # def send_raw(self, request):
+    #     with self._lock:
+    #         self._message_id += 1
+    #         self._socket.send((request+'\n').encode())
+
+    def handle_reply(self, request, reply):
+        raise NotImplementedError("Override this function")
+
+
+class Miner(JsonRcpClient):
+    def __init__(self, username, password):
+        super().__init__()
+
+    def handle_reply(self, request, reply):
         print(reply)
 
 
+
 # TEST (slush pool)
-client = JsonRcpClient()
+client = Miner("DarkSteel98.asus", "pwd")  #Miner("Darksteel.worker1", 'pwd')
 client.connect('stratum+tcp://stratum.slushpool.com:3333')
+
+client.send("mining.authorize", ["DarkSteel98.asus", "pwd"])
 client.send("mining.subscribe", [])
 
