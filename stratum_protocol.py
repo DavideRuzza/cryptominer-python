@@ -1,6 +1,39 @@
 import socket, json, urllib.parse, threading
-from time import sleep
+import time
+import sys
+# from time import sleep
 
+
+
+class LogStyle():
+    '''Increase terminal legibility'''
+    
+    # HELP: https://stackoverflow.com/questions/287871/how-to-print-colored-text-to-the-terminal
+    LOG = ["[LOG]", "0;30;47"]
+    WARNING = ["[WARNING]", "0;30;43"]
+    ERROR = ["[ERROR]", "0;30;41"]
+    OK = ["[OK]", "6;30;42"]
+    
+    
+    
+def log(*message, style=["[-]", ''], date=True):
+    '''logging message with colored style
+
+        style parameter should be set equal to ՝LogStyle.LOG՝, ՝LogStyle.WARNING՝ or ՝LogStyle.ERROR՝
+    '''
+    log_str = style[0]
+    log_style = style[1]
+    print(f'\x1b[{log_style}m{log_str:^9}\x1b[0m', end='')
+    
+    if date:
+        print('\x1b[1;30;1m - '+time.strftime("%d/%m/%y %H:%M:%S", time.gmtime())+" - \x1b[0m", end='') 
+    
+    log_space = f"\x1b[{log_style}m"+ " "*9 + "\x1b[0m"
+    date_space = ' '*23 if date else ''
+    
+    print(("\n"+log_space+date_space).join([f"{msg}" for msg in message]))
+    
+     
 class JsonRcpClient(object):
     ''' Simple Json RCP client'''
     
@@ -31,8 +64,6 @@ class JsonRcpClient(object):
                 # get the reply id which refer to the corresponding response
                 request = self._requests[reply.get('id')]  
             
-            
-
             self.handle_reply(request, reply)
             
         
@@ -80,17 +111,56 @@ class JsonRcpClient(object):
         raise NotImplementedError("Override this function")
 
 
+class Subscription(object):
+    def __init__(self):
+        self._id = None
+        self._extranounce1 = None
+        self._extranounce2_size = None
+        self._difficulty = None
+        self._target = None
+        
+        
+    id = property(lambda s: self._id)
+    extranounce1 = property(lambda s: self._extranounce1)
+    extranounce2_size = property(lambda s: self._extranounce2_size)
+    
+    def set_subscription():
+        pass
+   
+    
 class Miner(JsonRcpClient):
-    def __init__(self, username, password):
+    
+    class AuthorizationException(Exception): pass
+    
+    def __init__(self, username: str, password: str):
         super().__init__()
+        self._username = username
+        self._password = password
+        self._subscription = Subscription()
 
     def handle_reply(self, request, reply):
-        print(reply)
+        if reply.get("error") != None and reply.get("result") == None:
+            error = reply.get('error')
+            log("Bad request message.", 
+                f"Code Error:{error[0]}", 
+                f"Cause of the problem: '{error[1]}'",
+                style=LogStyle.WARNING)
+            sys.exit()
+        elif request:
+            if request.get("method") == "mining.authorize":
+                if reply.get("result") == True:
+                    log("Authorization Accepted", style=LogStyle.OK)
+                else:
+                    log("Authorization Failed. check username or password", style=LogStyle.ERROR)
+                    sys.exit()
 
-
+        # else:       
+        #     if reply.get("method") == "mining.set_difficulty":
+        #         pass
+        
 
 # TEST (slush pool)
-client = Miner("DarkSteel98.asus", "pwd")  #Miner("Darksteel.worker1", 'pwd')
+client = Miner("DarkSteel98.asus", "pwd")
 client.connect('stratum+tcp://stratum.slushpool.com:3333')
 
 client.send("mining.authorize", ["DarkSteel98.asus", "pwd"])
