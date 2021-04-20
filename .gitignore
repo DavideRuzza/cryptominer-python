@@ -2,3 +2,4 @@ venv
 .vscode
 nightminer.py
 .idea
+test.ipynb
