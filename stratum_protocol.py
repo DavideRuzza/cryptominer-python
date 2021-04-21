@@ -121,22 +121,23 @@ class JsonRcpClient(object):
         raise NotImplementedError("Override this function")
 
 class Job(object):
-    def __init__(self, job_id, coinb1, coinb2, extranonce1, extranonce2_size, version, prev_hash, bits, ntime, merkle_tree):
+    def __init__(self, job_id, coinb1, coinb2, extranonce1, extranonce2_size, version, prev_hash, bits, ntime, merkle_tree, target):
 
         # job finsh flag
         self._done = False
 
         # job parameters
         self._job_id = job_id
-        self._conib1 = coinb1
+        self._coinb1 = coinb1
         self._coinb2 = coinb2
         self._extranonce1 = extranonce1
         self._extranonce2_size = extranonce2_size
         self._version = version
         self._bits = bits
-        self._perv_hash = prev_hash
+        self._prev_hash = prev_hash
         self._ntime = ntime
         self._merkle_tree = merkle_tree
+        self._target = target
         
         # miner metrics
         self._dt = 0.0
@@ -186,11 +187,11 @@ class Job(object):
 
     def calc_extranonce2_bin(self, extranonce):
         ''' format extranonce2 as requested from server '''
-        if self.extranonce2_size == 8:
+        if self._extranonce2_size == 8:
             return struct.pack("<Q", extranonce)
-        elif self.extranonce2_size == 4:
+        elif self._extranonce2_size == 4:
             return struct.pack("<I", extranonce)
-        elif self.extranonce2_size == 2:
+        elif self._extranonce2_size == 2:
             return struct.pack("<H", extranonce)
         else:
             return None
@@ -199,10 +200,10 @@ class Job(object):
         ''' mining function as generator '''
         t0 = time.time()
         for extranonce2 in range(0, 2**(4*self._extranonce2_size)-1):
-
+            
             extranonce2_bin = self.calc_extranonce2_bin(extranonce2)
-
-            merkle_root_bin = self.calc_merkle_root_bin(self.merkle_tree, extranonce2_bin)
+            debug(f'{extranonce2_bin=}')
+            merkle_root_bin = self.calc_merkle_root_bin(self._merkle_tree, extranonce2_bin)
 
             header_bin_prefix = self.swap_endian(self._version) + self.swap_endian_4(self._prev_hash) + \
                                 merkle_root_bin + self.swap_endian(self._ntime) + self.swap_endian(self._bits)
@@ -214,7 +215,7 @@ class Job(object):
                     raise StopIteration()
 
                 nonce_bin = struct.pack('<I', nonce)
-                hash = self.dbl_sha256(header_bin_prefix+nounce_bin)[::-1]
+                hash = self.dbl_sha256(header_bin_prefix+nonce_bin)[::-1]
 
                 if hash < self._target:
                     log("Found nonce!", style=LogStyle.LOG)
@@ -246,15 +247,16 @@ class Subscription(object):
         self._password = None
 
         self._mining_thread = None        
-        
-    id = property(lambda s: s._id)
-    extranonce1 = property(lambda s: s._extranonce1)
-    extranonce2_size = property(lambda s: s._extranonce2_size)
+        self._job = None
+
+    # id = property(lambda s: s._id)
+    # extranonce1 = property(lambda s: s._extranonce1)
+    # extranonce2_size = property(lambda s: s._extranonce2_size)
     
     def set_subscription(self, sub_id, ext1, ext2_size):
-        id = sub_id
-        extranonce1 = ext1
-        extranonce2_size = ext2_size
+        self._id = sub_id
+        self._extranonce1 = ext1
+        self._extranonce2_size = ext2_size
 
     def set_difficulty(self, difficulty):
         
@@ -269,6 +271,9 @@ class Subscription(object):
 
 
     def spawn_new_job(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, version, bits, ntime, clean_job):
+        if self._job:
+            self._job.stop()
+        # clean_job = False
         # debug(f'{job_id=}', f'{version=}', f'{nbits=}', f'{ntime=}')
         if clean_job:
             log("Received Job is not clean. Waiting for clean job", style=LogStyle.WARNING)
@@ -276,14 +281,17 @@ class Subscription(object):
         else:
             log("Job Accepted", style=LogStyle.LOG)
             new_job = Job(job_id, 
-                        coinb1, coinb2, 
-                        self.extranonce1, 
-                        self.extranonce2_size, 
+                        coinb1, 
+                        coinb2, 
+                        self._extranonce1, 
+                        self._extranonce2_size, 
                         version, 
                         prev_hash, 
                         bits, ntime, 
-                        merkle_tree
+                        merkle_tree,
+                        self._target
                         )
+            self._job = new_job
             return new_job
 
         
@@ -327,9 +335,10 @@ class Miner(JsonRcpClient):
                 # server std reply to mining.authorize
                 # {"id": 1,"result":[[["mining.set_difficulty", "-"], ["mining.notify", subscription_id]], extranonce1, extranonce2_size]}
                 params = reply.get("result")
-                subscription_id = params[0][1][0] # is there a more clever way to take this values?
+                subscription_id = params[0][1][1] # is there a more clever way to take this values?
                 extranonce1 = params[1]
                 extranonce2_size = params[2]
+                debug(f'{extranonce2_size=}')
                 self._subscription.set_subscription(subscription_id, extranonce1, extranonce2_size)
         else:
             if reply.get("method") == "mining.set_difficulty":
@@ -345,12 +354,30 @@ class Miner(JsonRcpClient):
                 else:
                     log("Got new Job!", style=LogStyle.LOG)
                     self._job = self._subscription.spawn_new_job(*job_params)
+                    if self._job:
+                        self.start_mining()
 
     def start_mining(self):
-        pass
+        
+        def run(job=None):
+            debug("start_mine")
+            try:
+                debug("Start Mining")
+                for result in job.mine():
+                    params = [ self.username ] + [ result[k] for k in ('job_id', 'extranounce2', 'ntime', 'nounce') ]
+                    self.send('mining.submit', params)
+                    log("Found share: " + str(params), style=LogStyle.OK)
+                log("Hashrate: %s" % human_readable_hashrate(self._job.hashrate), style=LogStyle.LOG)
+
+
+        thread = threading.Thread(target = run, kwargs = dict(job=self._job))
+        thread.daemon = True
+        thread.start()
+
+
 
             
-DEBUG = False
+DEBUG = True
 
 # TEST (slush pool)
 client = Miner("DarkSteel98.asus", "pwd")
