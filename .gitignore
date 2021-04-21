@@ -3,3 +3,4 @@ venv
 nightminer.py
 .idea
 test.ipynb
+stratum_protocol.py
