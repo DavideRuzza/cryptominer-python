@@ -135,24 +135,40 @@ class Worker(object):
     def __init__(self, worker_name: str, finish_condition: threading.Condition, parent):
         self._workername = worker_name
         self._lock = threading.RLock()
-        self._parent = parent
+        self._parent = parent # class 'Miner'
 
-        self._finish_condition = finish_condition
+        self._finish_condition = finish_condition # condition to notify Miner the job is finished
         self._mine_thread = None
-        
-    def start_mining(self):
-        # TODO: add parameter to handle job
-        self._mine_thread = threading.Thread(target=self._mine)
-        self._mine_thread.daemon = True
-        self._mine_thread.start()
 
-    def _mine(self):
+        self._done = False # used to stop the mining
+
+    
+    def stop(self):
+        ''' stop current job '''
+        with self._lock:
+            self._done = True
+
+    def start_mining(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits,
+                     ntime, extranonce1, extranonce2_size, target, start=0, stride=1):
+        debug("mining start")
+        # self._mine_thread = threading.Thread(target=self._mine, args=(job_id, prev_hash, coinb1, coinb2, 
+        #     merkle_tree, version, nbits, ntime, extranonce1, extranonce2_size, target, start, stride))
+
+        # self._mine_thread.daemon = True
+        # self._mine_thread.start()
+
+    def _mine(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, extranonce1, extranonce2_size, target, start, stride):
+
+        # mining ....
+
+        # write resuolt to parent
         with self._lock:
             self._parent.set_result(f'Job finished by {self._workername}')
-        
+        # notify that job is done
         with self._finish_condition:
             self._finish_condition.notifyAll()
 
+    
     def __str__(self):
         return f'WorkerName:{self._workername}'
 
@@ -180,7 +196,7 @@ class Miner(JsonRcpClient):
 
 
     def set_result(self, result):
-        ''' used by a worker to return it's job'''
+        ''' used by a worker to return it's job to the parent Miner'''
         self._worker_result = result
 
     def _handle_workers(self):
@@ -188,9 +204,10 @@ class Miner(JsonRcpClient):
         while 1:
             with self._finish_condition:
                 self._finish_condition.wait()
-                # TODO: terminate all job 
-                log(self._worker_result)   
-
+                self.stop_workers()
+                # TODO: terminate all job , send server notification of job finished
+                log(self._worker_result)
+                   
     def _handle_reply(self, request, reply):
         debug(request, reply)
 
@@ -201,12 +218,13 @@ class Miner(JsonRcpClient):
         elif request:  # handle reply from a specific request
             if request.get('method') == 'mining.authorize':
 
-                full_worker_name = request.get('params')[0]  # full name = 'username.worker_name'
+                full_worker_name = request.get('params')[0]  # fullname = 'username.worker_name'
                 _ , worker_name = full_worker_name.split('.') 
 
                 if reply.get('result') == True: # add worker only if authorized
                     log(f"Authorized Worker: '{worker_name}'", style=LogStyle.OK)
-                    new_worker_obj = Worker(worker_name, self._finish_condition, self, random.randint(1, 3)) 
+                    # new_worker_obj = Worker(worker_name, self._finish_condition, self, random.randint(1, 3))
+                    new_worker_obj = Worker(worker_name, self._finish_condition, parent=self) 
                     self._workers.append(new_worker_obj) # add worker
                     # debug(new_worker_obj)
                 else:
@@ -225,11 +243,12 @@ class Miner(JsonRcpClient):
                 self._calc_target()
                 log(f"Setted difficulty to {self._difficulty}", f"New Target: {hexlify(self._target).decode()}")
             if reply.get('method') == 'mining.notify':
-                for worker in self._workers:
-                    worker.start_mining()
+                job_params = reply.get('params')
+                self.start_job(*job_params)
     
     @staticmethod
     def _as64(integer):
+        ''' return integer as 64 hex digit format '''
         return unhexlify(f'{integer:064x}')
 
     def _calc_target(self):
@@ -241,7 +260,6 @@ class Miner(JsonRcpClient):
         target = int(max_target/self._difficulty)
 
         self._target = self._as64(target)
-  
 
     def authorize_worker(self, worker_name, password):
         full_name = self._username + '.' + worker_name
@@ -252,6 +270,32 @@ class Miner(JsonRcpClient):
         #     log("Authorize some worker oterwise you will get no reward", style=LogStyle.WARNING)
         self.send(method='mining.subscribe', params=[])
 
+    def start_job(self, *job_params):
+        job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, clean_job = job_params
+
+        # BIG TODO: instead of stopping job. queuing the job and start it after a worker finish it's previous job
+        # this approach divide a single job and when a new one shows up all workers stops and then start the new job
+        self.stop_workers()
+        for worker_index, worker in self._workers:
+            worker.start_mining(job_id=job_id, 
+                                prev_hash=prev_hash,
+                                coinb1=coinb1,
+                                coinb2=coinb2,
+                                merkle_tree=merkle_tree,
+                                version=version,
+                                nbits=nbits,
+                                ntime=ntime,
+                                extranonce1=self._extranonce1,
+                                extranonce2_size=self._extranonce2_size,
+                                target=self._target,
+                                start=worker_index, 
+                                stride=len(self._workers))
+
+
+    def stop_workers(self):
+        ''' notify all workers to stop the mining process '''
+        for worker in self._workers:
+            worker.stop()
 
 
 if __name__ == "__main__":
