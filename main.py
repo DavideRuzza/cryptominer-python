@@ -138,40 +138,93 @@ class Worker(object):
         self._parent = parent # class 'Miner'
 
         self._finish_condition = finish_condition # condition to notify Miner the job is finished
-        self._mine_thread = None
+        self._worker_thread = None
 
-        self._done = False # used to stop the mining
+        self._cleaned_flag = False # used to clean all jobs
+        self._stop_flag = False    # used to stop current job
+        self._current_job_id = None
+        self._jobs_queue = dict()
 
+        
+        self._mine_thread = threading.Thread(target=self._work)
+        self._mine_thread.daemon = True
+        self._mine_thread.start()
+
+
+    def clean_job(self):
+        debug("cleaning jobs")
+        with self._lock:
+            self._cleaned =  True
+
+    def _stop(self):
+        with self._lock:
+            self._stop_flag = True
     
-    def stop(self):
-        ''' stop current job '''
-        with self._lock:
-            self._done = True
+    def remove_job(self, job_id):
+        ''' remove job from worker jobs queue '''
 
-    def start_mining(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits,
-                     ntime, extranonce1, extranonce2_size, target, start=0, stride=1):
-        debug("mining start")
-        # self._mine_thread = threading.Thread(target=self._mine, args=(job_id, prev_hash, coinb1, coinb2, 
-        #     merkle_tree, version, nbits, ntime, extranonce1, extranonce2_size, target, start, stride))
+        if job_id in self._jobs_queue:
+            del self._jobs_queue[job_id]
+        else:
+            # if the job_id is the one currently processed stop it.
+            self._stop_flag = True
 
-        # self._mine_thread.daemon = True
-        # self._mine_thread.start()
+    def stack_job(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, 
+                    version, nbits, ntime, extranonce1, extranonce2_size, target, start=0, stride=1):
+        ''' ad job to worker queue'''
+        new_job = dict(prev_hash=prev_hash,
+                        coinb1=coinb1,
+                        coinb2=coinb2,
+                        merkle_tree=merkle_tree,
+                        version=version,
+                        nbits=nbits,
+                        ntime=ntime,
+                        extranonce1=extranonce1,
+                        extranonce2_size=extranonce2_size,
+                        target=target,
+                        start=start, 
+                        stride=stride)
+        self._jobs_queue[job_id] = new_job
 
-    def _mine(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, extranonce1, extranonce2_size, target, start, stride):
-
+    def _work(self):
         # mining ....
+        while 1:
+            
+            if not len(self._jobs_queue) > 0:
+                # if there is any work to do
+                continue
+            
+            # reset flags
+            self._cleaned_flag = False
+            self._stop_flag = False
 
-        # write resuolt to parent
-        with self._lock:
-            self._parent.set_result(f'Job finished by {self._workername}')
-        # notify that job is done
-        with self._finish_condition:
-            self._finish_condition.notifyAll()
+            # init job. take the next job in list
+            self._current_job_id = next(iter(self._jobs_queue))
+            job = self._jobs_queue.pop(self._current_job_id)
+            debug(f"Start Job: {job_id}")
+            
+            # process job
+            for i in range(40):
+                if self._cleaned_flag or self._stop_flag:
+                    break
+                time.sleep(1)
 
+            # finishing
+            if self._cleaned_flag:
+                with self._lock:
+                    self._cleaned_flag = False
+                    self._jobs_queue = dict()
+                    debug("cleaned jobs")
+            
+
+            with self._lock:
+                # write result to parent
+                self._parent.set_result(f'Job {job_id} finished by {self._workername}')
+                # notify that job is done
+                self._finish_condition.notifyAll()
     
     def __str__(self):
         return f'WorkerName:{self._workername}'
-
 
 class Miner(JsonRcpClient):
     ''' Miner Class to handle server and workers '''
@@ -204,7 +257,7 @@ class Miner(JsonRcpClient):
         while 1:
             with self._finish_condition:
                 self._finish_condition.wait()
-                self.stop_workers()
+                # self.clean_workers_jobs()
                 # TODO: terminate all job , send server notification of job finished
                 log(self._worker_result)
                    
@@ -244,12 +297,7 @@ class Miner(JsonRcpClient):
                 log(f"Setted difficulty to {self._difficulty}", f"New Target: {hexlify(self._target).decode()}")
             if reply.get('method') == 'mining.notify':
                 job_params = reply.get('params')
-                self.start_job(*job_params)
-    
-    @staticmethod
-    def _as64(integer):
-        ''' return integer as 64 hex digit format '''
-        return unhexlify(f'{integer:064x}')
+                self.queue_new_job(*job_params)
 
     def _calc_target(self):
         ''' calculate target from difficulty given by pool'''
@@ -270,32 +318,38 @@ class Miner(JsonRcpClient):
         #     log("Authorize some worker oterwise you will get no reward", style=LogStyle.WARNING)
         self.send(method='mining.subscribe', params=[])
 
-    def start_job(self, *job_params):
+    def queue_new_job(self, *job_params):
         job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, clean_job = job_params
 
         # BIG TODO: instead of stopping job. queuing the job and start it after a worker finish it's previous job
         # this approach divide a single job and when a new one shows up all workers stops and then start the new job
-        self.stop_workers()
-        for worker_index, worker in self._workers:
-            worker.start_mining(job_id=job_id, 
-                                prev_hash=prev_hash,
-                                coinb1=coinb1,
-                                coinb2=coinb2,
-                                merkle_tree=merkle_tree,
-                                version=version,
-                                nbits=nbits,
-                                ntime=ntime,
-                                extranonce1=self._extranonce1,
-                                extranonce2_size=self._extranonce2_size,
-                                target=self._target,
-                                start=worker_index, 
-                                stride=len(self._workers))
+        if clean_job:
+            self.clean_workers_jobs()
+        for worker_index, worker in enumerate(self._workers):
+            
+            worker.stack_job(job_id=job_id,
+                    prev_hash=prev_hash,
+                    coinb1=coinb1,
+                    coinb2=coinb2,
+                    merkle_tree=merkle_tree,
+                    version=version,
+                    nbits=nbits,
+                    ntime=ntime,
+                    extranonce1=self._extranonce1,
+                    extranonce2_size=self._extranonce2_size,
+                    target=self._target,
+                    start=worker_index, 
+                    stride=len(self._workers))
 
-
-    def stop_workers(self):
+    def clean_workers_jobs(self):
         ''' notify all workers to stop the mining process '''
         for worker in self._workers:
-            worker.stop()
+            worker.clean_job()
+
+    @staticmethod
+    def _as64(integer):
+        ''' return integer as 64 hex digit format '''
+        return unhexlify(f'{integer:064x}')
 
 
 if __name__ == "__main__":
