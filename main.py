@@ -135,7 +135,7 @@ class Worker(object):
     def __init__(self, worker_name: str, finish_condition: threading.Condition, parent):
         self._workername = worker_name
         self._lock = threading.RLock()
-        self._parent = parent # class 'Miner'
+        self._parent = parent # class: 'Miner'
 
         self._finish_condition = finish_condition # condition to notify Miner the job is finished
         self._worker_thread = None
@@ -149,7 +149,6 @@ class Worker(object):
         self._mine_thread = threading.Thread(target=self._work)
         self._mine_thread.daemon = True
         self._mine_thread.start()
-
 
     def clean_job(self):
         debug("cleaning jobs")
@@ -165,13 +164,15 @@ class Worker(object):
 
         if job_id in self._jobs_queue:
             del self._jobs_queue[job_id]
-        else:
+        elif job_id == self._current_job_id:
             # if the job_id is the one currently processed stop it.
             self._stop_flag = True
+        else:
+            pass
 
     def stack_job(self, job_id, prev_hash, coinb1, coinb2, merkle_tree, 
                     version, nbits, ntime, extranonce1, extranonce2_size, target, start=0, stride=1):
-        ''' ad job to worker queue'''
+        ''' ad job to worker queue '''
         new_job = dict(prev_hash=prev_hash,
                         coinb1=coinb1,
                         coinb2=coinb2,
@@ -187,7 +188,7 @@ class Worker(object):
         self._jobs_queue[job_id] = new_job
 
     def _work(self):
-        # mining ....
+        
         while 1:
             
             if not len(self._jobs_queue) > 0:
@@ -198,31 +199,42 @@ class Worker(object):
             self._cleaned_flag = False
             self._stop_flag = False
 
-            # init job. take the next job in list
-            self._current_job_id = next(iter(self._jobs_queue))
+            # INIT
+            self._current_job_id = next(iter(self._jobs_queue))  # take the next job in list
             job = self._jobs_queue.pop(self._current_job_id)
-            debug(f"Start Job: {job_id}")
             
-            # process job
+            # PROCESSING JOB
             for i in range(40):
                 if self._cleaned_flag or self._stop_flag:
                     break
                 time.sleep(1)
 
-            # finishing
+            # FINISHING
             if self._cleaned_flag:
                 with self._lock:
                     self._cleaned_flag = False
                     self._jobs_queue = dict()
                     debug("cleaned jobs")
             
-
             with self._lock:
-                # write result to parent
-                self._parent.set_result(f'Job {job_id} finished by {self._workername}')
-                # notify that job is done
-                self._finish_condition.notifyAll()
+                self._parent.set_result(f'Job {job_id} finished by {self._workername}') # write result to parent
+                self._finish_condition.notifyAll() # notify that job is done
     
+    def calc_merkle_root_bin(extranonce2: str, extranonce1:str, merkle_tree:str, coinb1: str, coinb2: str):
+
+        coinbase = unhexlify(coinb1) + unhexlify(extranonce1) + unhexlify(extranonce2) + unhexlify(coinb2)
+
+        merkle_root = coinbase
+        for branch in merkle_tree:
+            merkle_root = self.dbl_sha256(merkle_root + unhexlify(branch))
+        
+        return merkle_root
+    
+    @staticmethod
+    def dbl_sha256(data: bytearray):
+        ''' return double sha256 of the imput data '''
+        return sha256(sha256(data).digest()).digest()
+
     def __str__(self):
         return f'WorkerName:{self._workername}'
 
@@ -240,7 +252,6 @@ class Miner(JsonRcpClient):
         self._finish_condition = threading.Condition()
         # use this variable to set the result of the job done by the corresponding worker 
         self._worker_result = None
-
 
         # this way we can handle multiple worker splitting the job
         self._worker_handler = threading.Thread(target=self._handle_workers)
@@ -321,8 +332,6 @@ class Miner(JsonRcpClient):
     def queue_new_job(self, *job_params):
         job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, clean_job = job_params
 
-        # BIG TODO: instead of stopping job. queuing the job and start it after a worker finish it's previous job
-        # this approach divide a single job and when a new one shows up all workers stops and then start the new job
         if clean_job:
             self.clean_workers_jobs()
         for worker_index, worker in enumerate(self._workers):
