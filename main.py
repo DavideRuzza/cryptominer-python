@@ -305,7 +305,7 @@ class Miner(JsonRcpClient):
         # use condition as notification when a worker find a share
         self._finish_condition = threading.Condition()
         # use this variable to set the result of the job done by the corresponding worker 
-        self._worker_result = None
+        self._worker_messages = []
 
         # this way we can handle multiple worker splitting the job
         self._worker_handler = threading.Thread(target=self._handle_workers)
@@ -315,16 +315,18 @@ class Miner(JsonRcpClient):
 
     def set_result(self, result):
         ''' used by a worker to return it's job to the parent Miner'''
-        self._worker_result = result
+        self._worker_messages.append(result)
 
     def _handle_workers(self):
         ''' handle of worker notification'''
         while 1:
             with self._finish_condition:
                 self._finish_condition.wait()
-                # self.clean_workers_jobs()
-                # TODO: terminate all job , send server notification of job finished
-                log(self._worker_result)
+                try:
+                    msg = self._worker_messages.pop(0)
+                    log(msg)
+                except:
+                    pass
                    
     def _handle_reply(self, request, reply):
         debug(request, reply)
@@ -386,6 +388,8 @@ class Miner(JsonRcpClient):
     def queue_new_job(self, *job_params):
         job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, clean_job = job_params
 
+        if len(merkle_tree) == 0:
+            return
         if clean_job:
             self.clean_workers_jobs()
         for worker_index, worker in enumerate(self._workers):
