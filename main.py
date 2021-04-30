@@ -5,6 +5,7 @@ import socket
 import urllib.parse
 import json
 import time
+import struct
 from binascii import hexlify, unhexlify
 from hashlib import sha256
 import random
@@ -153,7 +154,8 @@ class Worker(object):
     def clean_job(self):
         debug("cleaning jobs")
         with self._lock:
-            self._cleaned =  True
+            self._cleaned_flag =  True
+            self._jobs_queue = dict()
 
     def _stop(self):
         with self._lock:
@@ -198,38 +200,89 @@ class Worker(object):
             # reset flags
             self._cleaned_flag = False
             self._stop_flag = False
-
+            # debug(self._cleaned_flag, self._stop_flag)
             # INIT
             self._current_job_id = next(iter(self._jobs_queue))  # take the next job in list
             job = self._jobs_queue.pop(self._current_job_id)
-            
+            log(f"{self._workername} started job {self._current_job_id}")
+            # debug(job['extranonce1'], job['coinb1'], job['coinb2'])
+            # debug(f"{job['target']=}")
             # PROCESSING JOB
-            for i in range(40):
+            for extranonce2 in range(2**(8*job['extranonce2_size'])-1):
                 if self._cleaned_flag or self._stop_flag:
                     break
-                time.sleep(1)
+
+                extranonce2_b = self.calc_extranonce2_bin(extranonce2, job['extranonce2_size'])
+                # debug(f"{extranonce2_b=}")
+                merkle_root_b = self.calc_merkle_root_bin(extranonce2_b, job['extranonce1'], job['merkle_tree'], job['coinb1'], job['coinb2'])
+                # debug(f'{hexlify(merkle_root_b)}')
+
+                header_prefix_b = self.to_little(job['version']) + \
+                            self.swap_by_four(job['prev_hash']) + \
+                            merkle_root_b + \
+                            self.to_little(job['ntime']) + \
+                            self.to_little(job['nbits'])
+                
+                for nonce in range(job['start'], 2**(4*8)-1, job['stride']):
+
+                    if self._cleaned_flag or self._stop_flag:
+                        break
+
+                    nonce_b = struct.pack('<I', nonce)
+                    hash = self.dbl_sha256(header_prefix_b+nonce_b)[::-1]
+
+                    if hash <= job['target']:
+                        log(f"Worker {self.workername} found nonce {hexlify(nonce_b)} for job id {self._current_job_id}")
 
             # FINISHING
-            if self._cleaned_flag:
-                with self._lock:
-                    self._cleaned_flag = False
-                    self._jobs_queue = dict()
-                    debug("cleaned jobs")
+            with self._lock:
+                self._cleaned_flag = False
             
             with self._lock:
-                self._parent.set_result(f'Job {job_id} finished by {self._workername}') # write result to parent
+                self._parent.set_result(f'Job {self._current_job_id} finished by {self._workername}') # write result to parent
+
+            with self._finish_condition:
                 self._finish_condition.notifyAll() # notify that job is done
     
-    def calc_merkle_root_bin(extranonce2: str, extranonce1:str, merkle_tree:str, coinb1: str, coinb2: str):
 
-        coinbase = unhexlify(coinb1) + unhexlify(extranonce1) + unhexlify(extranonce2) + unhexlify(coinb2)
+    def calc_merkle_root_bin(self, extranonce2_b: bytearray, extranonce1: str, merkle_tree: list, coinb1: str, coinb2: str):
+        ''' given the extranonce2 return the merkleroot as bytearray'''
+        coinbase_b = unhexlify(coinb1) + unhexlify(extranonce1) + extranonce2_b + unhexlify(coinb2)
+        coinbase_hash_b = self.dbl_sha256(coinbase_b)
 
-        merkle_root = coinbase
+        merkle_root = coinbase_hash_b # start with coinbase
         for branch in merkle_tree:
             merkle_root = self.dbl_sha256(merkle_root + unhexlify(branch))
         
         return merkle_root
     
+    @staticmethod
+    def to_little(word):
+        ''' return word to little endian format '''
+        word = unhexlify(word)
+        return word[::-1]
+
+    @staticmethod
+    def swap_by_four(word):
+        word = unhexlify(word)
+        ''' swap input every four byte and little endian '''
+        if len(word)%8 != 0:
+            log("Word length not divisible by 8", style=LogStyle.WARNING)
+            sys.exit()
+        else:
+            return b''.join([word[4 * (i+1): 4*(i+2)]+word[4 * i: 4*(i+1)] for i in range(len(word)//8)])[::-1]
+
+    @staticmethod
+    def calc_extranonce2_bin(nonce, size):
+        ''' format extranonce2 as requested from server '''
+        if size == 8:
+            return struct.pack("<Q", nonce)
+        elif size == 4:
+            return struct.pack("<I", nonce)
+        else:
+            return struct.pack("<H", nonce)
+
+
     @staticmethod
     def dbl_sha256(data: bytearray):
         ''' return double sha256 of the imput data '''
@@ -247,6 +300,7 @@ class Miner(JsonRcpClient):
 
         self._extranonce1 = None
         self._extranonce2_size = None
+        self._target = None
 
         # use condition as notification when a worker find a share
         self._finish_condition = threading.Condition()
@@ -298,7 +352,7 @@ class Miner(JsonRcpClient):
                 # result be like:
                 # [[["mining.set_difficulty", "subscription id 1"], ["mining.notify", "subscription id 2"]], "extranonce1", extranonce2_size]
                 result = reply.get('result')
-                self._extranonce1 = unhexlify(result[1]) # as byte in hex
+                self._extranonce1 = result[1]
                 self._extranonce2_size = result[2]
         else:
             # finally handle request from server without any request
@@ -368,7 +422,7 @@ if __name__ == "__main__":
     miner = Miner("DarkSteel98")
     miner.connect("stratum+tcp://stratum.slushpool.com:3333")
     miner.authorize_worker("worker1", "pass")
-    # miner.authorize_worker("worker2", "pass")
+    miner.authorize_worker("worker2", "pass")
     # miner.authorize_worker("asus", "pass")
     miner.subscrime_mining()
     
