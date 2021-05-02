@@ -76,9 +76,13 @@ class JsonRcpClient(object):
             # Find if the reply was a response from a specific request 
             # or a simple notification from the server (response = None)
             request = None
+            
             if reply.get('id'):
                 # get the reply id which refer to the corresponding response
-                request = self._requests[reply.get('id')]  
+                try:
+                    request = self._requests[reply.get('id')] 
+                except:
+                    pass
             
             self._handle_reply(request, reply)
             
@@ -418,17 +422,28 @@ class Miner(JsonRcpClient):
         ''' return integer as 64 hex digit format '''
         return unhexlify(f'{integer:064x}')
 
+class Lc_miner(JsonRcpClient):
+
+    def __init__(self):
+        super().__init__()
+    
+    def _handle_reply(self, request, reply):
+        debug(request, reply)
 
 if __name__ == "__main__":
     os.system('color')
     DEBUG = True
     
-    miner = Miner("DarkSteel98")
-    miner.connect("stratum+tcp://stratum.slushpool.com:3333")
-    miner.authorize_worker("worker1", "pass")
-    miner.authorize_worker("worker2", "pass")
-    # miner.authorize_worker("asus", "pass")
-    miner.subscrime_mining()
+    client = Lc_miner()
+    client.connect('stratum+tcp://p2pool.hyperdonkey.com:9327')
+    client.send(method='mining.authorize', params=['LTgwQw53432NQn13PrjS7PcoXe1d658p8r', 'X'])
+    client.send(method='mining.subscribe', params=[])
+    # miner = Miner("DarkSteel98")
+    # miner.connect("stratum+tcp://stratum.slushpool.com:3333")
+    # miner.authorize_worker("worker1", "pass")
+    # miner.authorize_worker("worker2", "pass")
+    # # miner.authorize_worker("asus", "pass")
+    # miner.subscrime_mining()
     
     try:
         while 1:
