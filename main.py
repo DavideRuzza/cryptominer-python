@@ -145,8 +145,9 @@ class Worker(object):
         self._finish_condition = finish_condition # condition to notify Miner the job is finished
         self._worker_thread = None
 
-        self._cleaned_flag = False # used to clean all jobs
-        self._stop_flag = False    # used to stop current job
+        self._cleaned_flag = False  # used to clean all jobs
+        self._stop_flag = False     # used to stop current jo
+        self._found_share = False   # used to know whe
         self._current_job_id = None
         self._jobs_queue = dict()
 
@@ -156,7 +157,6 @@ class Worker(object):
         self._mine_thread.start()
 
     def clean_job(self):
-        debug("cleaning jobs")
         with self._lock:
             self._cleaned_flag =  True
             self._jobs_queue = dict()
@@ -204,13 +204,12 @@ class Worker(object):
             # reset flags
             self._cleaned_flag = False
             self._stop_flag = False
-            # debug(self._cleaned_flag, self._stop_flag)
+
             # INIT
             self._current_job_id = next(iter(self._jobs_queue))  # take the next job in list
             job = self._jobs_queue.pop(self._current_job_id)
             log(f"{self._workername} started job {self._current_job_id}")
-            # debug(job['extranonce1'], job['coinb1'], job['coinb2'])
-            # debug(f"{job['target']=}")
+
             # PROCESSING JOB
             for extranonce2 in range(2**(8*job['extranonce2_size'])-1):
                 if self._cleaned_flag or self._stop_flag:
@@ -237,16 +236,20 @@ class Worker(object):
 
                     if hash <= job['target']:
                         log(f"Worker {self.workername} found nonce {hexlify(nonce_b)} for job id {self._current_job_id}")
-
-            # FINISHING
-            with self._lock:
-                self._cleaned_flag = False
+                        self._stop_flag = True
             
-            with self._lock:
-                self._parent.set_result(f'Job {self._current_job_id} finished by {self._workername}') # write result to parent
+                        with self._lock: # send result to miner for submitting
+                            result = dict(type="result",
+                                          workername=self._workername,
+                                          job_id=self._current_job_id,
+                                          extranonce2=hexlify(extranonce2_b).decode(),
+                                          ntime=job['ntime'],
+                                          nonce=hexlify(nonce_b[::-1]).decode())
 
-            with self._finish_condition:
-                self._finish_condition.notifyAll() # notify that job is done
+                            self._parent.set_result(result) # write result to parent
+
+                        with self._finish_condition:
+                            self._finish_condition.notifyAll() # notify that job is done
     
 
     def calc_merkle_root_bin(self, extranonce2_b: bytearray, extranonce1: str, merkle_tree: list, coinb1: str, coinb2: str):
@@ -328,7 +331,17 @@ class Miner(JsonRcpClient):
                 self._finish_condition.wait()
                 try:
                     msg = self._worker_messages.pop(0)
-                    log(msg)
+                    if msg['type'].lower() == 'result':
+
+                        for worker in self._workers: # remove finished foj from other workers
+                            worker.remove_job(msg['job_id'])
+
+                        fullname = self._username + '.' + msg['workername']
+                        result = [fullname, msg['job_id'], msg["estranonce2"], msg['ntime'], msg['nonce']] # format parameter for server
+
+                        log("Submitting Share...")
+                        self.send(method='mining.submit', params=result) # submit
+
                 except:
                     pass
                    
@@ -360,14 +373,21 @@ class Miner(JsonRcpClient):
                 result = reply.get('result')
                 self._extranonce1 = result[1]
                 self._extranonce2_size = result[2]
+            
+            if request.get('method') == 'mining.submit':
+                result = reply.get('result')
+                if result:
+                    log("Share accepted", style=LogStyle.OK)
         else:
             # finally handle request from server without any request
             if reply.get('method') == 'mining.set_difficulty':
                 self._difficulty = reply.get('params')[0]
                 self._calc_target()
                 log(f"Setted difficulty to {self._difficulty}", f"New Target: {hexlify(self._target).decode()}")
+
             if reply.get('method') == 'mining.notify':
                 job_params = reply.get('params')
+                log("Got new job", style=LogStyle.LOG)
                 self.queue_new_job(*job_params)
 
     def _calc_target(self):
@@ -390,14 +410,21 @@ class Miner(JsonRcpClient):
         self.send(method='mining.subscribe', params=[])
 
     def queue_new_job(self, *job_params):
+        ''' stack received job to workers jobs queue '''
         job_id, prev_hash, coinb1, coinb2, merkle_tree, version, nbits, ntime, clean_job = job_params
 
         if len(merkle_tree) == 0:
+            # sometime happened ??
+            # maybe is not an error but who knows...
             return
+
         if clean_job:
+            # clean job if necessary
             self.clean_workers_jobs()
+            log("Cleaning Jobs")
+
         for worker_index, worker in enumerate(self._workers):
-            
+        
             worker.stack_job(job_id=job_id,
                     prev_hash=prev_hash,
                     coinb1=coinb1,
@@ -422,28 +449,16 @@ class Miner(JsonRcpClient):
         ''' return integer as 64 hex digit format '''
         return unhexlify(f'{integer:064x}')
 
-class Lc_miner(JsonRcpClient):
-
-    def __init__(self):
-        super().__init__()
-    
-    def _handle_reply(self, request, reply):
-        debug(request, reply)
-
 if __name__ == "__main__":
     os.system('color')
-    DEBUG = True
+    DEBUG = False
     
-    client = Lc_miner()
-    client.connect('stratum+tcp://p2pool.hyperdonkey.com:9327')
-    client.send(method='mining.authorize', params=['LTgwQw53432NQn13PrjS7PcoXe1d658p8r', 'X'])
-    client.send(method='mining.subscribe', params=[])
-    # miner = Miner("DarkSteel98")
-    # miner.connect("stratum+tcp://stratum.slushpool.com:3333")
-    # miner.authorize_worker("worker1", "pass")
-    # miner.authorize_worker("worker2", "pass")
+    miner = Miner("DarkSteel98")
+    miner.connect("stratum+tcp://eu.stratum.slushpool.com:3333")
+    miner.authorize_worker("worker1", "pass")
+    miner.authorize_worker("worker2", "pass")
     # # miner.authorize_worker("asus", "pass")
-    # miner.subscrime_mining()
+    miner.subscrime_mining()
     
     try:
         while 1:
