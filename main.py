@@ -462,11 +462,14 @@ if __name__ == "__main__":
     os.system('color')
     DEBUG = False
     
-    miner = Miner("DarkSteel98")
-    miner.connect("stratum+tcp://eu.stratum.slushpool.com:3333")
+    miner = Miner("username")
+    miner.connect("stratum+tcp://stratum.slushpool.com:3333")
     miner.authorize_worker("worker1", "pass")
-    miner.authorize_worker("worker2", "pass")
-    # # miner.authorize_worker("asus", "pass")
+
+    # authorize multiple worker if you want
+    # miner.authorize_worker("worker2", "pass")
+    # miner.authorize_worker("worker3", "pass")
+    
     miner.subscrime_mining()
     
     try:
