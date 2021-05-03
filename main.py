@@ -59,6 +59,8 @@ class JsonRcpClient(object):
         self._message_id = 1
         self._lock = threading.RLock()
         self._requests = dict()
+
+        self._url = None  # in case lost connection
     
     def rcp_thread_fun(self):
         data = ""
@@ -68,7 +70,12 @@ class JsonRcpClient(object):
             if '\n' in data:
                 (line, data) = data.split('\n', 1)
             else:
-                chunk = self._socket.recv(1024)
+                try:
+                    chunk = self._socket.recv(1024)
+                except ConnectionAbortedError:
+                    log("Connection Lost", style=LogStyle.ERROR)
+                    sys.exit() # TODO: reconnect and try again
+
                 data += chunk.decode()
                 continue
             
@@ -93,7 +100,7 @@ class JsonRcpClient(object):
         Args:
             url (str): server of mining pool
         """
-        
+        self._url = url
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         parser = urllib.parse.urlparse(url)
         
@@ -378,6 +385,8 @@ class Miner(JsonRcpClient):
                 result = reply.get('result')
                 if result:
                     log("Share accepted", style=LogStyle.OK)
+                else:
+                    LOG("Share not accepted", style=LogStyle.ERROR)
         else:
             # finally handle request from server without any request
             if reply.get('method') == 'mining.set_difficulty':
