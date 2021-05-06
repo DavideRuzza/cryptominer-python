@@ -223,9 +223,10 @@ class Worker(object):
                     break
 
                 extranonce2_b = self.calc_extranonce2_bin(extranonce2, job['extranonce2_size'])
-                # debug(f"{extranonce2_b=}")
-                merkle_root_b = self.calc_merkle_root_bin(extranonce2_b, job['extranonce1'], job['merkle_tree'], job['coinb1'], job['coinb2'])
-                # debug(f'{hexlify(merkle_root_b)}')
+                extranonce2_str = hexlify(extranonce2_b).decode('ascii')
+
+                merkle_root_hex = self.calc_merkle_root_bin(extranonce2_str, job['extranonce1'], job['merkle_tree'], job['coinb1'], job['coinb2'])
+                merkle_root_b = unhexlify(merkle_root_hex)
 
                 header_prefix_b = self.to_little(job['version']) + \
                             self.swap_by_four(job['prev_hash']) + \
@@ -259,17 +260,36 @@ class Worker(object):
                             self._finish_condition.notifyAll() # notify that job is done
     
 
-    def calc_merkle_root_bin(self, extranonce2_b: bytearray, extranonce1: str, merkle_tree: list, coinb1: str, coinb2: str):
+    def calc_merkle_root_bin(self, extranonce2: str, extranonce1: str, merkle_tree: list, coinb1: str, coinb2: str):
         ''' given the extranonce2 return the merkleroot as bytearray'''
-        coinbase_b = unhexlify(coinb1) + unhexlify(extranonce1) + extranonce2_b + unhexlify(coinb2)
-        coinbase_hash_b = self.dbl_sha256(coinbase_b)
-
-        merkle_root = coinbase_hash_b # start with coinbase
-        for branch in merkle_tree:
-            merkle_root = self.dbl_sha256(merkle_root + unhexlify(branch))
+        coinbase = coinb1 + extranonce1 + extranonce2 + coinb2
+        
+        merkle_tree.insert(0, coinbase) # add coinbase to transaction list 
+        merkle_root = self.merkle(merkle_tree)
         
         return merkle_root
-    
+
+    def merkle(self, hashList):
+        ''' recursive function to calculate merkle root starting from a hash list '''
+        if len(hashList) == 1:
+            return hashList[0]
+        newHashList = []
+        # Process pairs. For odd length, the last is skipped
+        for i in range(0, len(hashList)-1, 2):
+            newHashList.append(self.hash2(hashList[i], hashList[i+1]))
+        if len(hashList) % 2 == 1: # odd, hash last item twice
+            newHashList.append(self.hash2(hashList[-1], hashList[-1]))
+        return self.merkle(newHashList)
+
+    @staticmethod
+    def hash2(a, b):
+        # Reverse inputs before and after hashing
+        # due to big-endian / little-endian nonsense
+        a1 = unhexlify(a)[::-1]
+        b1 = unhexlify(b)[::-1]
+        h = sha256(sha256(a1+b1).digest()).digest()
+        return hexlify(h[::-1])
+
     @staticmethod
     def to_little(word):
         ''' return word to little endian format '''
@@ -278,13 +298,14 @@ class Worker(object):
 
     @staticmethod
     def swap_by_four(word):
-        word = unhexlify(word)
         ''' swap input every four byte and little endian '''
+        word = unhexlify(word)
+        
         if len(word)%8 != 0:
             log("Word length not divisible by 8", style=LogStyle.WARNING)
             sys.exit()
         else:
-            return b''.join([word[4 * (i+1): 4*(i+2)]+word[4 * i: 4*(i+1)] for i in range(len(word)//8)])[::-1]
+            return b''.join([word[4*i: 4*(i+1)][::-1] for i in range(int(len(word)/4))])
 
     @staticmethod
     def calc_extranonce2_bin(nonce, size):
@@ -295,7 +316,6 @@ class Worker(object):
             return struct.pack("<I", nonce)
         else:
             return struct.pack("<H", nonce)
-
 
     @staticmethod
     def dbl_sha256(data: bytearray):
